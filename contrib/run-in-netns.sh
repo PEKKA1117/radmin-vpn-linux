@@ -15,6 +15,24 @@
 # sysctls / netfilter). In a clean network namespace Radmin connects and works
 # normally, same kernel and bundled Wine.
 #
+# ---------------------------------------------------------------------------
+# READ THIS FIRST — the VPN stays inside the namespace.
+#
+# The TAP device (radminvpn0) and the 26.0.0.0/8 route are created *inside* the
+# namespace, because that is where run.sh runs. Radmin will reach "ready", the
+# GUI will show your networks, chat and peer discovery work — but no process on
+# the host can talk to 26.0.0.0/8. Your game, launched normally, sees nothing.
+#
+# This is a diagnostic tool and a fallback for hosts where nothing else works,
+# not a gaming setup. To actually use the VPN, the application has to join the
+# namespace too:
+#
+#     sudo ip netns exec radminvpn runuser -u "$USER" -- <your app>
+#
+# which means carrying DISPLAY/XAUTHORITY/XDG_RUNTIME_DIR/PulseAudio into it as
+# well — workable for a dedicated server binary, painful for a Steam game.
+# ---------------------------------------------------------------------------
+#
 # Usage:   sudo bash run-in-netns.sh [/path/to/RadminVPN-Linux-*.AppImage]
 # Close the Radmin window to exit; the namespace + NAT rules are torn down automatically.
 set -u
@@ -24,11 +42,11 @@ VETH_H=rvpn-h ; VETH_N=rvpn-n
 SUBNET=10.201.0 ; HOST_IP=$SUBNET.1 ; NS_IP=$SUBNET.2
 USER_NAME="${SUDO_USER:-$(id -un)}"
 UID_N="$(id -u "$USER_NAME")"
+HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)"
 # Look where an AppImage plausibly landed, in the invoking user's home — any
 # locale's download directory, and the XDG one if it is configured.
 APP="${1:-}"
 if [ -z "$APP" ]; then
-    HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)"
     XDG_DL="$(runuser -u "$USER_NAME" -- xdg-user-dir DOWNLOAD 2>/dev/null || true)"
     for d in "$XDG_DL" "$HOME_DIR/Downloads" "$HOME_DIR/Descargas" \
              "$HOME_DIR/Téléchargements" "$HOME_DIR/Загрузки" "$HOME_DIR"; do
@@ -91,9 +109,20 @@ grep -E '^nameserver' /etc/resolv.conf 2>/dev/null \
 ip netns exec "$NS" ping -c1 -W3 1.1.1.1 >/dev/null 2>&1 \
   && echo "[+] netns has internet" || echo "[!] warning: no internet inside netns"
 
+# On X11, DISPLAY alone is not enough: display managers keep the cookie in
+# XDG_RUNTIME_DIR, not ~/.Xauthority, and sudo strips XAUTHORITY on distros that
+# do not env_keep it. Without it neither the GUI nor the AppImage's sudo askpass
+# dialog can open, and the script just hangs with no visible prompt.
+XAUTH="${XAUTHORITY:-}"
+if [ ! -r "$XAUTH" ]; then
+    XAUTH="$(find "/run/user/$UID_N" -maxdepth 1 -name 'xauth_*' 2>/dev/null | head -n1)"
+    [ -n "$XAUTH" ] && [ -r "$XAUTH" ] || XAUTH="$HOME_DIR/.Xauthority"
+fi
+
 echo "[*] launching Radmin VPN (close its window to exit)..."
 ip netns exec "$NS" runuser -u "$USER_NAME" -- \
   env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+      XAUTHORITY="$XAUTH" XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}" \
       XDG_RUNTIME_DIR="/run/user/$UID_N" \
       DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UID_N/bus" \
   "$APP"
