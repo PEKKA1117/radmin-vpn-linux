@@ -141,6 +141,7 @@ Produces:
 - `build/netsh64.exe` — netsh replacement (64-bit PE, installed to System32)
 - `build/drvinst.exe` — no-op stub replacing Radmin's real NDIS driver installer (issue #12)
 - `build/tap_bridge` — native Linux TAP bridge
+- `build/rvpn_dnsfix.so` — native LD_PRELOAD shim, preloaded into the service only
 - `build/rvpn_filter_ui` — optional GTK4 packet-filter UI (`--filter-ui`)
 
 ### Building the AppImage
@@ -170,11 +171,14 @@ The wineprefix is stored in `./wineprefix/` (source run) or `~/.local/share/radm
 | `netsh.exe` / `netsh64.exe` | Replaces Wine's netsh stub (32-bit in SysWOW64, 64-bit in System32). Translates Windows `netsh interface ip` commands to Linux `ip addr`/`ip link` commands via a file-based relay, validating the address before it reaches the root relay. |
 | `rvpn_launcher.exe` | Injects `adapter_hook.dll` into the Radmin service process via `CreateRemoteThread` + `LoadLibrary`. |
 | `drvinst.exe` | No-op stub replacing Radmin's real NDIS driver installer. Radmin runs it at runtime to load `NetMP60_1_1_64.sys`, which aborts Wine 11.x via `NdisInitializeReadWriteLock` (issue #12); since our driver already replaces that adapter, the real one must never load. |
+| `rvpn_dnsfix.so` | Native `LD_PRELOAD` shim, injected into the service launch only. Short-circuits reverse DNS (`getnameinfo`/`gethostbyaddr`) of private IPv4/IPv6 at the glibc layer. Radmin PTR-resolves every local candidate address it gathers; on a host whose resolver black-holes RFC1918 PTR queries that stalls for minutes and the service registers but never becomes ready (issue #16). The lookup is issued by Wine's Unix side, out of reach of any hook inside `adapter_hook.dll`. |
 | `rvpn_filter_ui` | Optional GTK4 UI to inspect and filter the packets crossing the bridge. Off by default; launch with `--filter-ui`. |
 
 ## Troubleshooting
 
 **GUI stuck on "Waiting for adapter"**: the driver isn't loading. Check that `/tmp/radmin_driver.log` exists and has content. If empty, the driver service registration may be missing — delete the wineprefix and re-run.
+
+**Registered but never "ready"**: the service reaches `Registered as #…` and stops there. Two known causes, both reported by the diagnostics block printed on timeout. (a) A transparent proxy or tunnel with its own routing policy (sing-box, clash/mihomo, v2ray…) intercepting the outbound connection — such stacks answer the TCP handshake locally, so the socket reads ESTABLISHED while nothing is relayed. Exclude `26.0.0.0/8` from its routes, and `*.radminte.com` too if you can reach those directly. (b) A resolver that black-holes reverse lookups of private addresses (a `docker0` at `172.17.0.1` is the usual trigger). `rvpn_dnsfix.so` handles this, but it is a 64-bit shim: a system Wine built as *old-wow64* ignores it. Workaround there — add a line for the address to `/etc/hosts`, or use `contrib/run-in-netns.sh`.
 
 **Service dies immediately**: check `/tmp/radmin_service.log` for Wine errors. Common cause: old wineprefix from a different Wine version. Delete `./wineprefix/` and re-run.
 
@@ -207,6 +211,21 @@ The routes are scoped to the TAP device, so they're auto-removed when `run.sh` t
 ## Notes
 
 **Wine bug workaround.** The `RegSetKeySecurity` hook works around a [known Wine limitation](https://forum.winehq.org/viewtopic.php?t=37183) where services don't receive the SYSTEM SID (S-1-5-18). This may be fixed upstream in a future Wine release.
+
+## Credits
+
+Reverse engineering and the Wine shim: [@baptisterajaut](https://github.com/baptisterajaut).
+
+- [@ayozetr](https://github.com/ayozetr) — tracked the "registers but never ready" hang down to a
+  reverse-DNS lookup of a private address black-holed by the host resolver, proved it with a
+  bare-libc repro after four wrong theories had been discarded (mine included), and wrote the
+  original of `src/rvpn_dnsfix.c` and `contrib/run-in-netns.sh`.
+- [@gringoestrangeiro](https://github.com/gringoestrangeiro) — Linux stability work: packet filters,
+  ARP cache, crash recovery, headless and datacenter modes.
+- [@yuxiaole-bili](https://github.com/yuxiaole-bili) — found that Wine's SCM auto-starts a second,
+  unhooked service instance that fights the injected one for the adapter.
+- [@D1spell-tech](https://github.com/D1spell-tech), [@Milkiway13](https://github.com/Milkiway13) and
+  everyone who pasted a full diagnostics block — two independent hosts is what makes a bug findable.
 
 ## License
 
