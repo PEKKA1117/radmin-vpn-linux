@@ -37,6 +37,7 @@ jobs:
             build/drvinst.exe
             build/tap_bridge
             build/rvpn_filter_ui
+            build/rvpn_dnsfix.so
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4

@@ -31,12 +31,18 @@ MINGW64_LIB := $(firstword $(wildcard \
 
 BINS = $(BUILD)/tap_bridge $(BUILD)/rvpnnetmp.sys $(BUILD)/adapter_hook.dll \
        $(BUILD)/rvpn_launcher.exe $(BUILD)/netsh.exe $(BUILD)/netsh64.exe \
-       $(BUILD)/drvinst.exe $(BUILD)/rvpn_filter_ui
+       $(BUILD)/drvinst.exe $(BUILD)/rvpn_filter_ui $(BUILD)/rvpn_dnsfix.so
 
 all: check-deps $(BINS) post-build
 
 $(BUILD)/tap_bridge: src/tap_bridge.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $< -lpthread
+
+# Native LD_PRELOAD shim, injected into the service launch by run.sh (issue #16).
+# Never stripped or UPX'd in post-build: it is preloaded, its dynamic symbols are
+# the whole point.
+$(BUILD)/rvpn_dnsfix.so: src/rvpn_dnsfix.c | $(BUILD)
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< -ldl
 
 $(BUILD)/rvpn_filter_ui: src/rvpn_filter_ui.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $< $(shell pkg-config --cflags --libs gtk4)
@@ -137,7 +143,7 @@ appimage: check-build-artifacts
 	./packaging/build-appimage.sh
 
 check-build-artifacts:
-	@for f in tap_bridge rvpnnetmp.sys adapter_hook.dll rvpn_launcher.exe netsh.exe netsh64.exe drvinst.exe; do \
+	@for f in tap_bridge rvpnnetmp.sys adapter_hook.dll rvpn_launcher.exe netsh.exe netsh64.exe drvinst.exe rvpn_dnsfix.so; do \
 		[ -f "$(BUILD)/$$f" ] || { echo "Missing: $(BUILD)/$$f (run 'make' first)"; exit 1; }; \
 	done
 	@if [ ! -f "$(BUILD)/rvpn_filter_ui" ]; then echo "[!] rvpn_filter_ui not found — will be skipped"; fi
