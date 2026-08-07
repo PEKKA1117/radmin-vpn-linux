@@ -107,7 +107,8 @@ cleanup() {
     [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
     [ -n "$RELAY_PID" ] && kill "$RELAY_PID" 2>/dev/null || true
     sudo ip link delete "$TAP_DEV" 2>/dev/null || true
-    rm -f "$CMD_FILE" "${CMD_FILE}.proc" /tmp/rvpn_b2d /tmp/rvpn_d2b /tmp/rvpn_mac /tmp/rvpn_filters.json
+    rm -f "$CMD_FILE" "${CMD_FILE}.proc" /tmp/rvpn_b2d /tmp/rvpn_d2b \
+          /tmp/rvpn_d2b_high /tmp/rvpn_d2b_low /tmp/rvpn_mac /tmp/rvpn_filters.json
     # Collect a debug bundle of everything captured this run.
     if [ "${RVPN_DEBUG:-0}" = "1" ]; then
         BUND="/tmp/rvpn_debug_$(date +%Y%m%d_%H%M%S)"
@@ -309,7 +310,15 @@ wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v Start /t REG_
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v Type /t REG_DWORD /d 1 /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v Group /t REG_SZ /d "NDIS" /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v ErrorControl /t REG_DWORD /d 0 /f
+# Disable SCM auto-start for RvControlSvc, EVERY launch (issue #16, yuxiaole-bili).
+# Setting this only at install time leaves Start=2 on any prefix installed by an
+# older run.sh or re-installed since: Wine's SCM then spawns a second, UNHOOKED
+# "RvControlSvc.exe /service" alongside rvpn_launcher's hooked "/run" instance.
+# The two contend for the virtual adapter and the hooked one never reaches ready.
+wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\RvControlSvc" /v Start /t REG_DWORD /d 4 /f || true
 } > /dev/null 2>&1
+# Cleared before the wineserver boot below, which is when the driver opens it.
+rm -f /tmp/radmin_driver.log
 
 wineserver -k 2>/dev/null || true
 wine reg add "HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\Memory Management" /v SystemPages /t REG_DWORD /d 0xFFFFFFFF /f > /dev/null 2>&1
@@ -336,7 +345,11 @@ rm -f "$CMD_FILE" "${CMD_FILE}.proc"
 RELAY_PID=$!
 
 # 9. Clear old logs
-rm -f "$LOG" "$WINEPREFIX/drive_c/radmin_driver.log" /tmp/radmin_driver.log
+# NOT /tmp/radmin_driver.log here: the driver opened it at the wineserver boot
+# triggered above, so removing it now just unlinks a live inode — the driver keeps
+# writing into a file nobody can see, and every report comes back with an empty
+# driver log (#16). It is cleared before that boot instead, see step 7.
+rm -f "$LOG" "$WINEPREFIX/drive_c/radmin_driver.log"
 
 # Maximum-logging debug mode (RVPN_DEBUG=1): capture service + GUI crash
 # backtraces and a full state bundle on exit. Negligible normal-path overhead
@@ -365,11 +378,33 @@ export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree=;mshtml=};netsh.exe=n"
 # of RvControlSvc.exe is needed.
 
 say "Starting Radmin VPN service..."
+# adapter_hook logs in APPEND mode and is never truncated, so a stale file makes
+# the diagnostics block a concatenation of several runs (different builds
+# included) — which has already sent bug triage down the wrong path. One run, one
+# log.
+rm -f "$WINEPREFIX/drive_c/radmin_hook_debug.log"
 cd "$RADMIN"
 # Service Wine debug channels: silent by default, +seh backtrace when debugging.
 _svc_winedebug="-all"
 [ "$RVPN_DEBUG" = "1" ] && _svc_winedebug="+seh,+tid,+pid"
-WINEDEBUG="$_svc_winedebug" WINE_LARGE_ADDRESS_AWARE=1 wine rvpn_launcher.exe /run > /tmp/radmin_service.log 2>&1 &
+# rvpn_dnsfix.so short-circuits reverse DNS of private addresses at the glibc
+# layer (issue #16): the ROL connector PTR-resolves every local candidate it
+# gathers, and on a host whose resolver black-holes RFC1918 PTR that stalls for
+# minutes — registered, never ready. On the affected hosts the lookup is issued
+# by Wine's Unix side, out of reach of any hook inside adapter_hook.dll.
+# Subshell so LD_PRELOAD applies to the service only, never to the GUI or the
+# filter UI started later; guarded so a missing .so cannot break the launch.
+(
+    if [ -f "$BUILD_DIR/rvpn_dnsfix.so" ]; then
+        # Prepend, never overwrite: gamemode/mangohud/obs-vkcapture users have
+        # their own LD_PRELOAD and would silently lose it for this process.
+        export LD_PRELOAD="$BUILD_DIR/rvpn_dnsfix.so${LD_PRELOAD:+:$LD_PRELOAD}"
+    else
+        warn "rvpn_dnsfix.so missing — private reverse-DNS stalls are not mitigated"
+    fi
+    export WINEDEBUG="$_svc_winedebug" WINE_LARGE_ADDRESS_AWARE=1
+    exec wine rvpn_launcher.exe /run
+) > /tmp/radmin_service.log 2>&1 &
 
 say "Waiting for service to become ready..."
 SERVICE_START=$(date +%s)

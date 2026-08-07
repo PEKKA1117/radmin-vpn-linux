@@ -359,8 +359,16 @@ wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v Start /t REG_
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v Type /t REG_DWORD /d 1 /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v Group /t REG_SZ /d "NDIS" /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v ErrorControl /t REG_DWORD /d 0 /f
+# Every launch, not just install: a prefix left at Start=2 makes Wine's SCM spawn
+# a second, UNHOOKED RvControlSvc that fights the hooked one for the adapter (#16).
+# Must stay BEFORE the wineserver restart below — services.exe reads this at boot.
+wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\RvControlSvc" /v Start /t REG_DWORD /d 4 /f || true
 } > /dev/null 2>&1
 good "Registry configured"
+
+# Cleared here, before the boot that makes the driver open it: removing it later
+# only unlinks a live inode and the log never appears (see run.sh).
+rm -f /tmp/radmin_driver.log
 
 # Restart wineserver so it loads the driver on next boot
 wineserver -k 2>/dev/null || true
@@ -385,12 +393,25 @@ rm -f "$CMD_FILE" "${CMD_FILE}.proc"
 RELAY_PID=$!
 
 # ── 12. Clear old logs ──
-rm -f "$LOG" "$WINEPREFIX/drive_c/radmin_driver.log"
+# adapter_hook logs in append mode and is never truncated — a stale file turns
+# the diagnostics block into a mix of several runs (see run.sh).
+rm -f "$LOG" "$WINEPREFIX/drive_c/radmin_driver.log" \
+      "$WINEPREFIX/drive_c/radmin_hook_debug.log"
 
 # ── 13. Start service ──
 say "Starting Radmin VPN service..."
 cd "$RADMIN"
-wine rvpn_launcher.exe /run > /tmp/radmin_service.log 2>&1 &
+# LD_PRELOAD scoped to the service: short-circuits reverse DNS of private
+# addresses at the glibc layer, out of reach of any in-Wine hook (#16). A VPS with
+# a docker0 hits the same black-holed PTR stall as a desktop. See run.sh.
+(
+    if [ -f "$BUILD_DIR/rvpn_dnsfix.so" ]; then
+        export LD_PRELOAD="$BUILD_DIR/rvpn_dnsfix.so${LD_PRELOAD:+:$LD_PRELOAD}"
+    else
+        warn "rvpn_dnsfix.so missing — private reverse-DNS stalls are not mitigated"
+    fi
+    exec wine rvpn_launcher.exe /run
+) > /tmp/radmin_service.log 2>&1 &
 
 # ── 14. Wait for service ready + extract VPN IP ──
 say "Waiting for service ready..."
