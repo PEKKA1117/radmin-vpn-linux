@@ -39,6 +39,9 @@ DIAG_FAILS=0
 diag_ok()   { echo "  [ok]   $1"; }
 diag_miss() { echo "  [MISS] $1"; DIAG_FAILS=$((DIAG_FAILS+1)); }
 diag_bad()  { echo "  [BAD]  $1"; DIAG_FAILS=$((DIAG_FAILS+1)); }
+# Something worth reporting that is NOT necessarily a fault — must not inflate
+# the failure count, or the summary sends triage after the wrong thing.
+diag_warn() { echo "  [warn] $1"; }
 
 # dump_log NAME PATH [transform]
 # Failure-tolerant tail of a log file. transform=utf16 → iconv UTF-16LE→UTF-8.
@@ -94,12 +97,30 @@ sanity_checks() {
     else
         diag_miss "TAP $tap not found"
     fi
+    # `|| true` is load-bearing, not defensive noise: dump_diagnostics runs under
+    # the caller's `set -euo pipefail`, and grep exits 1 when the key is absent —
+    # pipefail propagates it and the failed assignment kills the whole dump right
+    # here, silently truncating the block reporters paste into issues. `timeout`
+    # for the same reason: this runs after a crash, wineserver may be wedged.
     local rvpn_start
-    rvpn_start=$(wine reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\rvpnnetmp" /v Start 2>/dev/null \
-        | grep -oE '0x[0-9a-f]+' | head -n1)
+    rvpn_start=$(timeout 10 wine reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\rvpnnetmp" /v Start 2>/dev/null \
+        | grep -oE '0x[0-9a-f]+' | head -n1) || true
     [ -n "$rvpn_start" ] \
         && diag_ok "registry rvpnnetmp (Start=$rvpn_start)" \
         || diag_miss "registry rvpnnetmp not found"
+    # Start != 4 means Wine's SCM can auto-spawn an unhooked second instance (#16).
+    local svc_start
+    svc_start=$(timeout 10 wine reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\RvControlSvc" /v Start 2>/dev/null \
+        | grep -oE '0x[0-9a-f]+' | head -n1) || true
+    # Numeric compare: Wine prints 0x4 today, but a 0x00000004 would fall through
+    # to the catch-all and cry duplicate-service at someone whose setup is fine.
+    if [ -z "$svc_start" ]; then
+        diag_miss "registry RvControlSvc Start not found"
+    elif [ "$((svc_start))" -eq 4 ] 2>/dev/null; then
+        diag_ok "registry RvControlSvc (Start=$svc_start, SCM auto-start off)"
+    else
+        diag_bad "registry RvControlSvc Start=$svc_start — SCM will spawn an unhooked duplicate"
+    fi
 }
 
 # ── dump_diagnostics REASON ─────────────────────────────────────────────────────
@@ -169,9 +190,81 @@ dump_diagnostics() {
     fi
     echo ""
 
+    # ── Transparent proxy / policy routing (issue #19) ──────────────────────────
+    # `ip route show` only reads table main. A transparent proxy (sing-box, clash/
+    # mihomo, v2ray, tun2socks…) puts its routes in a dedicated table reached by an
+    # `ip rule` whose priority beats main's 32766 — sing-box defaults to table 2022
+    # at priority 9000 — so none of it appears in `ip route show default` and the
+    # host looks perfectly normal. `ip route get` runs a real FIB lookup *through*
+    # the rules, so it reports the device the traffic actually leaves by.
+    # Worth its own section because `ss` cannot tell you: sing-box's default
+    # `system` TCP stack completes the handshake locally, in the kernel, before it
+    # even dials upstream — the service's socket shows ESTABLISHED while not one
+    # byte is relayed. Registered-but-never-ready with a healthy-looking ESTAB.
+    echo "--- Transparent proxy / policy routing ---"
+    local srv_ip route_srv route_peer egress_dev alt_rules proxies
+    # timeout: resolving inside a diagnostics dump, on a bug class that is often a
+    # DNS stall in the first place, is asking for the dump itself to hang.
+    srv_ip=$(timeout 5 getent ahostsv4 proxy.radminte.com 2>/dev/null | awk 'NR==1{print $1}') || true
+    [ -n "$srv_ip" ] || srv_ip="148.113.190.78"   # fail.radminte.com, last known
+    # `uid` makes the lookup honour uid-range rules; older iproute2 rejects it.
+    route_srv=$(ip route get "$srv_ip" uid "$(id -u)" 2>/dev/null | head -n1) || true
+    [ -n "$route_srv" ] || route_srv=$(ip route get "$srv_ip" 2>/dev/null | head -n1) || true
+    route_peer=$(ip route get 26.0.0.1 uid "$(id -u)" 2>/dev/null | head -n1) || true
+    [ -n "$route_peer" ] || route_peer=$(ip route get 26.0.0.1 2>/dev/null | head -n1) || true
+    echo "  [info] to Famatech ($srv_ip): ${route_srv:-<unknown>}"
+    echo "  [info] to VPN peers (26.0.0.1): ${route_peer:-<unknown>}"
+
+    egress_dev=$(printf '%s\n' "$route_srv" \
+        | sed -n 's/.*[[:space:]]dev[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p') || true
+    alt_rules=$(ip rule show 2>/dev/null | grep -vE '^0:|lookup (local|main|default)') || true
+    # -x on the executable NAME, never -f on the cmdline: a full-cmdline match
+    # hits any shell, editor or browser that merely mentions one of these words.
+    proxies=$(pgrep -a -x 'sing-box|mihomo|clash|clash-meta|v2ray|xray|hysteria|tun2socks|nekobox' \
+        2>/dev/null | head -n 5) || true
+
+    if [ -n "$alt_rules" ]; then
+        diag_warn "policy-routing rules beyond the standard three:"
+        printf '%s\n' "$alt_rules" | sed 's/^/           /'
+    fi
+    if [ -n "$proxies" ]; then
+        diag_warn "proxy core running:"
+        printf '%s\n' "$proxies" | sed 's/^/           /'
+    fi
+    # The verdict is the routing fact, not the presence of a proxy: a tun whose
+    # exclusions are already correct sends Famatech out the default interface and
+    # must not be blamed. Egress != default-route device = actually intercepted.
+    local main_dev
+    main_dev=$(ip route show default 2>/dev/null \
+        | sed -n 's/.*[[:space:]]dev[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' | head -n1) || true
+    if [ -n "$egress_dev" ] && [ -n "$main_dev" ] && [ "$egress_dev" != "$main_dev" ]; then
+        diag_bad "traffic to Famatech leaves via '$egress_dev', not the default-route interface '$main_dev'."
+        echo "         Something is redirecting it — a transparent proxy or a tunnel with its"
+        echo "         own routing policy. Radmin's control channel rarely survives one: such"
+        echo "         stacks answer the TCP handshake locally, so the socket reads ESTABLISHED"
+        echo "         while nothing is relayed, and the service registers but never gets ready."
+        echo "         In its routing config, exclude at least 26.0.0.0/8 (VPN peer traffic is"
+        echo "         local to $tap and has no business in a tunnel), and *.radminte.com too if"
+        echo "         you can reach it directly. Disabling it is the quickest way to confirm."
+    fi
+    # Canary, useful even with no proxy in sight: our 26.0.0.0/8 route lives in
+    # table main, so any policy rule at a priority below 32766 silently wins.
+    # Only meaningful once run.sh has actually installed that route — it does so
+    # *after* the ready gate, so on a "never became ready" dump it is legitimately
+    # absent and judging it there would fail every single bug report.
+    local peer_route_set
+    peer_route_set=$(ip route show 26.0.0.0/8 dev "$tap" 2>/dev/null) || true
+    if [ -n "$peer_route_set" ]; then
+        case "$route_peer" in
+            ""|*" dev $tap"|*" dev $tap "*) : ;;
+            *) diag_bad "VPN peer traffic (26.0.0.0/8) does not leave via $tap — another routing policy wins" ;;
+        esac
+    fi
+    echo ""
+
     echo "--- Firewall ---"
     local fw
-    fw=$(command -v nft iptables firewall-cmd 2>/dev/null | sed 's/^/  /')
+    fw=$(command -v nft iptables firewall-cmd 2>/dev/null | sed 's/^/  /') || true
     if [ -n "$fw" ]; then
         echo "$fw"
     else
@@ -184,7 +277,10 @@ dump_diagnostics() {
     echo ""
 
     dump_log "launcher stdout/stderr" /tmp/radmin_service.log
-    dump_log "driver log"             "$WINEPREFIX/drive_c/radmin_driver.log"
+    # The driver writes to \??\unix\tmp\radmin_driver.log (src/rvpnnetmp.c), i.e.
+    # /tmp — never inside the prefix. Pointing at the prefix made this section say
+    # "(file not found)" on every single report (#16, yuxiaole-bili).
+    dump_log "driver log"             /tmp/radmin_driver.log
     dump_log "adapter_hook log"       "$WINEPREFIX/drive_c/radmin_hook_debug.log"
     dump_log "service log (Famatech)" "${LOG:-$WINEPREFIX/drive_c/ProgramData/Famatech/Radmin VPN/service.log}" utf16
     dump_log "tap_bridge log"         /tmp/radmin_bridge.log
