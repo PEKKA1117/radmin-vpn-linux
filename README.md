@@ -25,7 +25,7 @@ chmod +x RadminVPN-Linux-x86_64.AppImage
 ./RadminVPN-Linux-x86_64.AppImage
 ```
 
-On first launch it will prompt for the Radmin VPN installer (download `Radmin_VPN_*.exe` from [radmin-vpn.com](https://www.radmin-vpn.com/) first). A terminal opens with progress, and one sudo password prompt is needed for TAP setup.
+On first launch it downloads the Radmin VPN installer it is validated against (or pass your own with `--installer`). A terminal opens with progress, and one sudo password prompt is needed for TAP setup.
 
 Persistent state (wineprefix, MAC, logs) lives in `~/.local/share/radmin-vpn-linux/`.
 
@@ -36,7 +36,7 @@ Persistent state (wineprefix, MAC, logs) lives in `~/.local/share/radmin-vpn-lin
 - **iconv** (glibc) — for service log parsing
 - **sudo** access — for TAP device creation and routing
 - **TUN/TAP kernel support** — usually built-in, check with `modprobe tun`
-- **Radmin VPN installer** — download from [radmin-vpn.com](https://www.radmin-vpn.com/). **Must be a 2.0.x build** (developed against 2.0.4899.9). Radmin VPN **1.4 is not supported** — it registers and opens the adapter but never finishes connecting under the Wine shim, leaving the GUI stuck at "Connecting...".
+- **Radmin VPN installer** — downloaded automatically if absent. The version this project is validated against is pinned in one place, `RADMIN_VERSION` in `lib.sh` (currently **2.1.4951.1**; 2.0.4899.9 also works). Radmin VPN **1.4 is not supported** — it registers and opens the adapter but never finishes connecting under the Wine shim, leaving the GUI stuck at "Connecting...".
 
 ### Arch Linux
 
@@ -81,9 +81,20 @@ On subsequent runs, just:
 |------|-------------|
 | `--installer <path>` | Path to the `Radmin_VPN_*.exe` installer (first run only). |
 | `--no-ui` | Run the service without launching the Radmin GUI. |
+| `--update` | Upgrade Radmin to the pinned version in place. Keeps the prefix, so the RID registered with Famatech survives. |
 | `--no-broadcast-routes` | Don't add the broadcast/multicast → TAP routes. |
 | `--filter-ui` | Launch the optional GTK4 packet-filter UI (off by default). |
 | `--fix-chat` | Patch Qt's `qwindows.dll` to fix the chat-window crash under Wine (off by default). |
+
+### Radmin's own auto-updater
+
+Radmin's GUI can download a newer build and run its installer *inside the live prefix*,
+which kills the GUI and faults the running service (the GUI log then shows an installer
+under `AppData\\Local\\Temp`). Two defences: the launcher ships the current validated
+build so the updater has nothing to push, and a GUI that dies no longer takes the tunnel
+with it — it is restarted once, then the VPN keeps running headless. To upgrade
+deliberately, use `./run.sh --update`, which stops everything first. Turning off
+"Automatic updates" in the GUI settings avoids the race entirely.
 
 Both `--filter-ui` and `--fix-chat` are opt-in. The filter UI needs the `rvpn_filter_ui`
 binary (built by `make`); the chat fix needs `patch_qwindows_font.py` and a Python 3 interpreter.

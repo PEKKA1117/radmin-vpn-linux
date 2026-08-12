@@ -34,6 +34,35 @@ die()  { echo -e "${RED}[-]${NC} $1" >&2; exit 1; }  # fatal — prints and exit
 wine_version_str() { wine --version 2>/dev/null | head -n1; }
 wine_major() { wine_version_str | sed -n 's/^wine-\([0-9]\+\).*/\1/p'; }
 
+# ── Radmin version pinning ──────────────────────────────────────────────────────
+# The Radmin build this project is validated against. Everything derives from it:
+# the download URL, the cached installer name, and the --update target. Bump this
+# single constant after testing a new Radmin release end to end (service reaches
+# "ready" AND a peer ping runs at 0% loss).
+#
+# Radmin's own in-app updater will otherwise push a newer build into a live
+# prefix mid-session, which kills the GUI and crashes the running service.
+# Shipping the current build is what keeps that updater with nothing to do.
+RADMIN_VERSION="${RADMIN_VERSION:-2.1.4951.1}"
+radmin_installer_name() { printf 'Radmin_VPN_%s.exe' "$RADMIN_VERSION"; }
+radmin_installer_url() {
+    printf 'https://download.radmin-vpn.com/download/files/Radmin_VPN_%s.exe' "$RADMIN_VERSION"
+}
+
+# Version installed in $WINEPREFIX, read offline from the registry (no wine call).
+# Empty when nothing is installed or the prefix predates the uninstall entry.
+radmin_installed_version() {
+    local reg="$WINEPREFIX/system.reg"
+    [ -f "$reg" ] || return 0
+    grep -a -A4 '"DisplayName"="Radmin VPN' "$reg" 2>/dev/null \
+        | sed -n 's/^"DisplayVersion"="\([0-9.]*\)".*/\1/p' | head -n1
+}
+
+# True when $1 is strictly newer than $2 (dotted numeric versions).
+version_gt() {
+    [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+}
+
 # ── Wine desktop-integration hygiene ────────────────────────────────────────────
 # winemenubuilder.exe rewrites the HOST's desktop file associations (.exe, .msi,
 # .lnk, .reg, .chm, ...) so they open in whatever prefix spawned it. Left enabled,
@@ -478,10 +507,11 @@ health_check() {
 
     echo "Checking for Radmin VPN installer..."
     local installer
-    installer=$(find . -maxdepth 2 -name "Radmin_VPN_*.exe" -print -quit 2>/dev/null || true)
+    installer=$(find . "${RADMIN_DATA_DIR:-$HOME/.local/share/radmin-vpn-linux}" \
+                     -maxdepth 2 -name "Radmin_VPN_*.exe" -print -quit 2>/dev/null || true)
     [ -n "$installer" ] \
         && check_pass "Installer found: $installer" \
-        || check_warn "No installer found in current directory"
+        || check_pass "No installer cached — $(radmin_installer_name) will be downloaded on first run"
     echo
 
     echo "=== Health Check Complete ==="

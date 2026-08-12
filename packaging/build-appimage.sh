@@ -118,8 +118,8 @@ else
 fi
 
 # Radmin VPN Windows installer is intentionally NOT bundled — it is downloaded
-# at runtime (RADMIN_INSTALLER_URL). Never ship the proprietary installer inside
-# the AppImage.
+# at runtime from the version pinned in lib.sh (RADMIN_VERSION), overridable via
+# RADMIN_INSTALLER_URL. Never ship the proprietary installer inside the AppImage.
 
 # run.sh (adapted, lives in the AppImage; sourced via AppRun)
 cp "$ROOT/run.sh" "$APPDIR/usr/bin/run.sh"

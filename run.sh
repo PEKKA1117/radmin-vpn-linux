@@ -1,7 +1,9 @@
 #!/bin/bash
 # run.sh - Radmin VPN on Linux
-# Usage: ./run.sh [--installer /path/to/Radmin_VPN_*.exe] [--no-ui]
+# Usage: ./run.sh [--installer /path/to/Radmin_VPN_*.exe] [--no-ui] [--update]
 #                 [--no-broadcast-routes] [--filter-ui] [--fix-chat]
+#   --update     upgrade Radmin to the pinned version (lib.sh RADMIN_VERSION),
+#                reusing the prefix so the RID registered with Famatech survives
 #   --filter-ui  launch the optional GTK4 packet-filter UI (off by default)
 #   --fix-chat   patch Qt qwindows.dll to fix the chat crash (off by default)
 set -euo pipefail
@@ -66,36 +68,53 @@ FIX_CHAT=0
 
 # Parse args
 INSTALLER=""
+INSTALLER_EXPLICIT=""
 for arg in "$@"; do
     case "$arg" in
-        --installer) shift; INSTALLER="$1"; shift ;;
-        --installer=*) INSTALLER="${arg#*=}" ;;
+        --installer) shift; INSTALLER="$1"; INSTALLER_EXPLICIT=1; shift ;;
+        --installer=*) INSTALLER="${arg#*=}"; INSTALLER_EXPLICIT=1 ;;
         --no-ui) NO_UI=1 ;;
         --no-broadcast-routes) NO_BCAST_ROUTES=1 ;;
         --filter-ui) FILTER_UI=1 ;;
         --fix-chat) FIX_CHAT=1 ;;
+        --update) DO_UPDATE=1 ;;
     esac
 done
+DO_UPDATE="${DO_UPDATE:-0}"
 NO_BCAST_ROUTES="${NO_BCAST_ROUTES:-0}"
 
-# Find installer if not specified
-if [ -z "$INSTALLER" ]; then
-    # Search project dir first, then BUILD_DIR (where AppImage bundles it)
-    INSTALLER=$(find "$DIR" -maxdepth 1 -name "Radmin_VPN_*.exe" -print -quit 2>/dev/null || true)
-    if [ -z "$INSTALLER" ]; then
-        INSTALLER=$(find "$BUILD_DIR" -maxdepth 1 -name "Radmin_VPN_*.exe" -print -quit 2>/dev/null || true)
-    fi
-fi
+INSTALLER_URL="${RADMIN_INSTALLER_URL:-$(radmin_installer_url)}"
+DOWNLOAD_DIR="${RADMIN_DATA_DIR:-$HOME/.local/share/radmin-vpn-linux}"
 
-# Download installer at runtime if still not found
-INSTALLER_URL="${RADMIN_INSTALLER_URL:-https://download.radmin-vpn.com/download/files/Radmin_VPN_2.0.4899.9.exe}"
-if [ -z "$INSTALLER" ] || [ ! -f "$INSTALLER" ]; then
-    DOWNLOAD_DIR="${RADMIN_DATA_DIR:-$HOME/.local/share/radmin-vpn-linux}"
-    mkdir -p "$DOWNLOAD_DIR"
-    INSTALLER="$DOWNLOAD_DIR/Radmin_VPN_2.0.4899.9.exe"
-    if [ ! -f "$INSTALLER" ]; then
-        _http_get "$INSTALLER" "$INSTALLER_URL" || die "download failed (install curl or wget)"
+# Find an installer, preferring the pinned build over any older .exe sitting in
+# the project dir. Downloads only as a last resort — and only when called, which
+# is exclusively from the install/update paths: an up-to-date prefix must never
+# pull 50+ MB just to start the VPN.
+ensure_installer() {
+    [ -n "$INSTALLER" ] && [ -f "$INSTALLER" ] && return 0
+    local name; name="$(radmin_installer_name)"
+    local d
+    for d in "$DIR" "$BUILD_DIR" "$DOWNLOAD_DIR"; do
+        [ -f "$d/$name" ] && { INSTALLER="$d/$name"; return 0; }
+    done
+    # No pinned build on disk: fall back to any Radmin installer, unless we were
+    # asked to update — an update to an older .exe is not an update.
+    if [ "$DO_UPDATE" -eq 0 ]; then
+        for d in "$DIR" "$BUILD_DIR"; do
+            INSTALLER=$(find "$d" -maxdepth 1 -name 'Radmin_VPN_*.exe' -print -quit 2>/dev/null || true)
+            [ -n "$INSTALLER" ] && return 0
+        done
     fi
+    mkdir -p "$DOWNLOAD_DIR"
+    INSTALLER="$DOWNLOAD_DIR/$name"
+    say "Downloading Radmin VPN $RADMIN_VERSION..."
+    _http_get "$INSTALLER" "$INSTALLER_URL" \
+        || { rm -f "$INSTALLER"; die "download failed (install curl or wget)"; }
+}
+# An explicit --installer wins, except with --update, which always means the
+# pinned build unless the user pointed at a specific file themselves.
+if [ "$DO_UPDATE" -eq 1 ] && [ -z "$INSTALLER_EXPLICIT" ]; then
+    INSTALLER=""
 fi
 
 cleanup() {
@@ -193,12 +212,14 @@ purge_hijacked_desktop_entries
 # Configure wineserver to use less memory
 wineserver -p 2>/dev/null || true
 
-# 2. Install Radmin if not present
-if [ ! -f "$RADMIN/RvControlSvc.exe" ]; then
+# Run the Radmin installer into $WINEPREFIX. Used both for the first install and
+# for --update: the installer upgrades in place, so the prefix — and with it the
+# RID registered with Famatech — survives an upgrade.
+install_radmin() {
+    ensure_installer
     if [ -z "$INSTALLER" ] || [ ! -f "$INSTALLER" ]; then
         die "installer not found"
     fi
-    say "Installing Radmin VPN (first run — this takes a moment)..."
     mkdir -p "$WINEPREFIX"
     wineboot --init 2>/dev/null
     if command -v winetricks >/dev/null 2>&1; then
@@ -224,7 +245,28 @@ if [ ! -f "$RADMIN/RvControlSvc.exe" ]; then
     # Belt and braces: if winemenubuilder ran despite the override, undo it now
     # rather than one launch later.
     purge_hijacked_desktop_entries
-    good "Radmin VPN installed"
+}
+
+# 2. Install Radmin if not present, or upgrade it on --update
+INSTALLED_VERSION="$(radmin_installed_version)"
+if [ ! -f "$RADMIN/RvControlSvc.exe" ]; then
+    say "Installing Radmin VPN $RADMIN_VERSION (first run — this takes a moment)..."
+    install_radmin
+    INSTALLED_VERSION="$(radmin_installed_version)"
+    good "Radmin VPN ${INSTALLED_VERSION:-$RADMIN_VERSION} installed"
+elif [ "$DO_UPDATE" -eq 1 ]; then
+    if [ -n "$INSTALLED_VERSION" ] && ! version_gt "$RADMIN_VERSION" "$INSTALLED_VERSION"; then
+        good "Radmin VPN $INSTALLED_VERSION is already current — nothing to update"
+    else
+        say "Updating Radmin VPN ${INSTALLED_VERSION:-?} → $RADMIN_VERSION (prefix and RID are kept)..."
+        install_radmin
+        INSTALLED_VERSION="$(radmin_installed_version)"
+        good "Radmin VPN updated to ${INSTALLED_VERSION:-$RADMIN_VERSION}"
+    fi
+elif [ -n "$INSTALLED_VERSION" ] && version_gt "$RADMIN_VERSION" "$INSTALLED_VERSION"; then
+    # Radmin's own updater would otherwise push this mid-session and take the
+    # running service down with it — better we do it, stopped and in control.
+    warn "Radmin VPN $INSTALLED_VERSION installed, $RADMIN_VERSION validated — run './run.sh --update' to upgrade (keeps your prefix and RID)"
 fi
 
 say "Installing components..."
@@ -435,8 +477,8 @@ for _ in $(seq 1 60); do
         if printf '%s' "$log_txt" | grep -qE 'Service version: *1\.4'; then
             ver=$(printf '%s' "$log_txt" | grep -oE 'Service version: *[0-9.]+' | head -n1)
             echo ""
-            echo "[-] Unsupported version ($ver). Use Radmin VPN 2.0.x."
-            echo "    rm -rf \"$WINEPREFIX\" && ./run.sh --installer /path/to/Radmin_VPN_2.0.*.exe"
+            echo "[-] Unsupported version ($ver). Use Radmin VPN 2.0.x or later."
+            echo "    ./run.sh --update      # upgrades in place, keeps your prefix and RID"
             exit 1
         fi
         vpn_ip=$(printf '%s' "$log_txt" | python3 -c "
@@ -507,8 +549,7 @@ fi
 #   QT_QUICK_BACKEND    -> e.g. "software" to force raster (unrelated to this bug,
 #                          left unset by default now).
 GUI_PID=""
-if [ "$NO_UI" -eq 0 ]; then
-    say "Starting GUI..."
+start_gui() {
     [ -n "${QT_QUICK_BACKEND:-}" ] && export QT_QUICK_BACKEND
     _gui_winedebug="-all"
     if [ "${RVPN_GUI_DEBUG:-0}" = "1" ]; then
@@ -527,6 +568,10 @@ if [ "$NO_UI" -eq 0 ]; then
             wine RvRvpnGui.exe > /tmp/radmin_gui.log 2>&1 &
     fi
     GUI_PID=$!
+}
+if [ "$NO_UI" -eq 0 ]; then
+    say "Starting GUI..."
+    start_gui
 else
     say "--no-ui: GUI not launched (service runs headless)"
 fi
@@ -540,10 +585,30 @@ fi
 good "Radmin VPN running — close the GUI or press Ctrl+C to stop."
 
 
-if [ -n "$GUI_PID" ]; then
-    wait "$GUI_PID" || true
-else
-    # Headless: no GUI to wait on — block on the service instead so cleanup
-    # (trap) still fires on Ctrl+C / service exit.
+# A GUI that dies must not take a working tunnel with it. Closing the window
+# yourself exits 0 and still shuts everything down (the documented behaviour); a
+# crash exits non-zero, and then we restart the GUI once and otherwise keep the
+# VPN up headless. Radmin's own updater is the usual killer here: it runs a newer
+# installer inside the live prefix, which kills the GUI and faults the service.
+GUI_RESTARTED=0
+while [ -n "$GUI_PID" ]; do
+    _gui_rc=0
+    wait "$GUI_PID" || _gui_rc=$?
+    [ "$_gui_rc" -eq 0 ] && break          # user closed the window → normal exit
+    if [ "$GUI_RESTARTED" -eq 0 ]; then
+        warn "GUI exited abnormally (code $_gui_rc) — VPN stays up, restarting the GUI once"
+        GUI_RESTARTED=1
+        start_gui
+    else
+        warn "GUI crashed again (code $_gui_rc) — continuing headless, VPN still up. Ctrl+C to stop."
+        warn "See /tmp/radmin_gui.log. If it mentions an installer under AppData\\Local\\Temp,"
+        warn "Radmin's auto-updater is the cause: turn off 'Automatic updates' in the GUI settings,"
+        warn "or upgrade in a controlled way with './run.sh --update'."
+        GUI_PID=""
+    fi
+done
+if [ -z "$GUI_PID" ]; then
+    # Headless (either --no-ui or a GUI that gave up): block on the service so
+    # cleanup (trap) still fires on Ctrl+C / service exit.
     wait || true
 fi

@@ -38,7 +38,9 @@ export WINESERVER="$APPDIR/wine/bin/wineserver"
 export WINEPREFIX="$DATA_DIR/wineprefix"
 export BUILD_DIR="$APPDIR/usr/lib/radmin-vpn"
 export RADMIN_DATA_DIR="$DATA_DIR"
-export RADMIN_INSTALLER_URL="https://download.radmin-vpn.com/download/files/Radmin_VPN_2.0.4899.9.exe"
+# Installer URL intentionally not set here: run.sh derives it from the single
+# pinned version in lib.sh (RADMIN_VERSION). Set RADMIN_INSTALLER_URL in the
+# environment to override.
 
 # ---- Askpass: native binary, else synthesize via zenity/kdialog ----
 if [ -z "${SUDO_ASKPASS:-}" ] && [ -n "${DISPLAY:-${WAYLAND_DISPLAY:-}}" ]; then
