@@ -180,6 +180,14 @@ The wineprefix is stored in `./wineprefix/` (source run) or `~/.local/share/radm
 
 **Registered but never "ready"**: the service reaches `Registered as #…` and stops there. Two known causes, both reported by the diagnostics block printed on timeout. (a) A transparent proxy or tunnel with its own routing policy (sing-box, clash/mihomo, v2ray…) intercepting the outbound connection — such stacks answer the TCP handshake locally, so the socket reads ESTABLISHED while nothing is relayed. Exclude `26.0.0.0/8` from its routes, and `*.radminte.com` too if you can reach those directly. (b) A resolver that black-holes reverse lookups of private addresses (a `docker0` at `172.17.0.1` is the usual trigger). `rvpn_dnsfix.so` handles this, but it is a 64-bit shim: a system Wine built as *old-wow64* ignores it. Workaround there — add a line for the address to `/etc/hosts`, or use `contrib/run-in-netns.sh` (which gets the service to "ready" but keeps the VPN inside a namespace: host applications cannot reach `26.0.0.0/8`, read the warning in its header).
 
+**Your *other* Wine apps broke after running Radmin (`unimplemented function ndis.sys.NdisInitializeReadWriteLock`)**: versions up to 1.0.0 let Wine's `winemenubuilder.exe` run, which rewrites the host's Windows file associations (`.exe`, `.msi`, `.lnk`, `.reg`, `.chm`, …) to open in *our* prefix. Other Windows programs then start inside the Radmin prefix, and if Radmin's real NDIS miniport (`RvNetMP60`) is still registered there, every one of them aborts on that ndis stub. 1.0.1 disables `winemenubuilder` everywhere, purges the entries it wrote for a Radmin prefix, and removes `RvNetMP60` from `system.reg` offline — just run 1.0.1 once and both are repaired. Note `echo $WINEPREFIX` shows nothing in this situation: the hijack lives in `~/.local/share/applications/*.desktop`, not in your environment. Manual cleanup, if you prefer:
+
+```bash
+grep -rl 'WINEPREFIX=[^"]*radmin' ~/.local/share/applications --include='*.desktop' | xargs -r rm
+rm -rf ~/.local/share/applications/wine/Programs/"Radmin VPN"
+update-desktop-database ~/.local/share/applications
+```
+
 **Service dies immediately**: check `/tmp/radmin_service.log` for Wine errors. Common cause: old wineprefix from a different Wine version. Delete `./wineprefix/` and re-run.
 
 **0% packet loss with one peer, high loss with many**: this was the original bug — fixed by MAC-based frame routing in the driver. Make sure you're using the latest build.

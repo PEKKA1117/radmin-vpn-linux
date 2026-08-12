@@ -34,6 +34,72 @@ die()  { echo -e "${RED}[-]${NC} $1" >&2; exit 1; }  # fatal — prints and exit
 wine_version_str() { wine --version 2>/dev/null | head -n1; }
 wine_major() { wine_version_str | sed -n 's/^wine-\([0-9]\+\).*/\1/p'; }
 
+# ── Wine desktop-integration hygiene ────────────────────────────────────────────
+# winemenubuilder.exe rewrites the HOST's desktop file associations (.exe, .msi,
+# .lnk, .reg, .chm, ...) so they open in whatever prefix spawned it. Left enabled,
+# our prefix hijacks the user's entire Wine desktop integration: their other
+# Windows apps then launch inside the Radmin prefix. Disable it for every wine
+# invocation — this is exported at source time, before the first one.
+export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}mscoree=;mshtml=;winemenubuilder.exe=d"
+
+# Purge desktop entries a previous run's winemenubuilder wrote for a Radmin
+# prefix. Conservative on purpose: an entry is removed only when its Exec line
+# pins a WINEPREFIX that is either the prefix we are about to use, or a path that
+# looks like a Radmin prefix (source checkout, AppImage data dir, older layouts).
+# Entries belonging to the user's own prefixes are left alone.
+purge_hijacked_desktop_entries() {
+    local apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    [ -d "$apps" ] || return 0
+
+    local list purged=0 f
+    list=$( { grep -rlsE 'WINEPREFIX=[^"]*[Rr]admin' "$apps" --include='*.desktop' 2>/dev/null || true
+              [ -n "${WINEPREFIX:-}" ] && grep -rlsF "WINEPREFIX=$WINEPREFIX" "$apps" --include='*.desktop' 2>/dev/null
+              true; } | sort -u )
+    [ -n "$list" ] || return 0
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        rm -f "$f" && purged=$((purged + 1))
+    done <<< "$list"
+
+    # winemenubuilder leaves empty Start Menu folders behind.
+    [ -d "$apps/wine" ] && find "$apps/wine" -type d -empty -delete 2>/dev/null
+    command -v update-desktop-database >/dev/null 2>&1 \
+        && update-desktop-database "$apps" 2>/dev/null
+    # CBA: the matching x-wine-extension-*.xml mime packages and .xpm icons are
+    # prefix-agnostic and shared with the user's other prefixes — left in place.
+
+    good "Purged $purged hijacked Wine desktop entries (file associations restored)"
+    return 0
+}
+
+# Radmin's real NDIS miniport (service RvNetMP60) aborts Wine 11.x inside
+# DriverEntry via ndis.sys!NdisInitializeReadWriteLock (issue #12), so it must
+# never stay registered in the prefix: Wine loads driver services at wineserver
+# boot, which makes EVERY app in that prefix crash, not just ours.
+#
+# Removing it with `wine reg delete` is a trap — that command boots the prefix,
+# which loads the very driver we are trying to remove, and the abort can take the
+# delete down with it, leaving the prefix poisoned forever. Edit system.reg
+# offline instead, with the wineserver down.
+scrub_ndis_driver() {
+    local reg="$WINEPREFIX/system.reg"
+    rm -f "$WINEPREFIX/drive_c/windows/system32/drivers/RvNetMP60.sys" \
+          "$WINEPREFIX/drive_c/windows/system32/drivers/NetMP60_1_1_64.sys"
+    [ -f "$reg" ] || return 0
+    grep -qa 'Services\\\\RvNetMP60' "$reg" || return 0
+
+    wineserver -k 2>/dev/null || true
+    if awk '/^\[/ { drop = ($0 ~ /Services\\\\RvNetMP60(\\\\|\])/) } !drop' "$reg" > "$reg.rvpn"; then
+        mv "$reg.rvpn" "$reg"
+        good "Removed poisoned RvNetMP60 driver service from the prefix (issue #12)"
+    else
+        rm -f "$reg.rvpn"
+        warn "Could not scrub RvNetMP60 from $reg — Wine crashes are expected"
+    fi
+    return 0
+}
+
 # ── Diagnostic result helpers (dump_diagnostics style) ──────────────────────────
 DIAG_FAILS=0
 diag_ok()   { echo "  [ok]   $1"; }

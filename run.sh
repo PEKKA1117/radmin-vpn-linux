@@ -180,6 +180,16 @@ fi
 pkill -f "RvControlSvc|RvRvpnGui|rvpn_launcher" 2>/dev/null || true
 sleep 0.3
 wineserver -k 2>/dev/null || true
+
+# 1b. Repair anything a previous version left poisoned, while the prefix is
+# quiet and BEFORE the first wine invocation. Both are no-ops on a clean setup.
+#   - RvNetMP60 registered in the prefix makes every app started there crash on
+#     ndis.sys!NdisInitializeReadWriteLock (issue #12).
+#   - winemenubuilder-written .desktop entries redirect the host's Windows file
+#     associations into our prefix, breaking the user's other Wine apps.
+scrub_ndis_driver
+purge_hijacked_desktop_entries
+
 # Configure wineserver to use less memory
 wineserver -p 2>/dev/null || true
 
@@ -206,10 +216,14 @@ if [ ! -f "$RADMIN/RvControlSvc.exe" ]; then
         die "installation failed"
     fi
     wineserver -k 2>/dev/null || true
-    wine reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\RvNetMP60" /f > /dev/null 2>&1 || true
-    rm -f "$WINEPREFIX/drive_c/windows/system32/drivers/RvNetMP60.sys"
+    # The installer registers the real NDIS miniport. Remove it offline, before
+    # any further wine command boots the prefix and loads it (issue #12).
+    scrub_ndis_driver
     wine reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\RvControlSvc" /v Start /t REG_DWORD /d 4 /f > /dev/null 2>&1 || true
     wineserver -k 2>/dev/null || true
+    # Belt and braces: if winemenubuilder ran despite the override, undo it now
+    # rather than one launch later.
+    purge_hijacked_desktop_entries
     good "Radmin VPN installed"
 fi
 
@@ -226,10 +240,7 @@ cp "$BUILD_DIR/netsh64.exe" "$WINEPREFIX/drive_c/windows/system32/netsh.exe"
 # replaces that adapter, so the real NDIS driver must never load.
 cp "$BUILD_DIR/drvinst.exe" "$RADMIN/drvinst.exe"
 
-# Scrub any real NDIS driver left behind on a poisoned prefix (run every launch
-# so an already-poisoned prefix recovers without reinstall).
-wine reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\RvNetMP60" /f > /dev/null 2>&1 || true
-rm -f "$WINEPREFIX/drive_c/windows/system32/drivers/RvNetMP60.sys"
+# (the real NDIS driver is scrubbed offline in step 1b, before any wine call)
 
 if [ -f "$MAC_FILE" ]; then
     ADAPTER_MAC=$(cat "$MAC_FILE")
@@ -304,6 +315,10 @@ wine reg add "HKLM\SYSTEM\CurrentControlSet\Control\Network\{4d36e972-e325-11ce-
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Control\Network\{4d36e972-e325-11ce-bfc1-08002be10318}\\${TAP_GUID}\Connection" /v PnpInstanceID /t REG_SZ /d "ROOT\NET\0099" /f
 wine reg add "HKLM\Software\Wow6432Node\Famatech\RadminVPN\1.0\Firewall" /v AdapterId /t REG_SZ /d "$TAP_GUID" /f
 wine reg add "HKLM\SOFTWARE\Famatech\RadminVPN\1.0\Registration" /f
+# Persist the winemenubuilder kill inside the prefix too, so a launch that does
+# not come from run.sh (a stale .desktop, a manual `wine` call) can never
+# re-hijack the host's file associations.
+wine reg add "HKCU\Software\Wine\DllOverrides" /v winemenubuilder.exe /t REG_SZ /d "" /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v DisplayName /t REG_SZ /d "Radmin VPN TAP Bridge" /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v ImagePath /t REG_EXPAND_SZ /d "C:\windows\system32\drivers\rvpnnetmp.sys" /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v Start /t REG_DWORD /d 2 /f
@@ -370,7 +385,10 @@ fi
 # native PE sits in syswow64, so our wrapper would be skipped. Deferred to here
 # so the install-phase firewall CA can use Wine's builtin stub (our wrapper
 # doesn't exist until step 3 copies it).
-export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree=;mshtml=};netsh.exe=n"
+# Appends to the base overrides lib.sh already exported (mscoree/mshtml off,
+# winemenubuilder disabled) — never replace them, the winemenubuilder kill must
+# survive for every wine invocation.
+export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}netsh.exe=n"
 
 # Note: the CSetupAdapter dangling-INetwork crash (joining a network with many
 # networks active) is fixed at runtime by adapter_hook.dll's release guard

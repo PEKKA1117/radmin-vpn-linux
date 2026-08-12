@@ -157,6 +157,11 @@ fi
 
 # ── 1. Kill any previous session ──
 wineserver -k 2>/dev/null || true
+
+# Repair a prefix poisoned by an older version, while it is quiet and before the
+# first wine call (see lib.sh — issue #12 and the winemenubuilder hijack).
+scrub_ndis_driver
+purge_hijacked_desktop_entries
 # Kill leftover Xvfb on our display
 if [ -f "/tmp/.X${VNC_DISPLAY#:}-lock" ]; then
     OLD_XVFB_PID=$(cat "/tmp/.X${VNC_DISPLAY#:}-lock" 2>/dev/null | tr -d ' ')
@@ -257,8 +262,7 @@ if [ ! -f "$RADMIN/RvControlSvc.exe" ]; then
     wineserver -k 2>/dev/null || true
     sleep 1
     # Remove real NDIS driver (crashes Wine — we replace it with rvpnnetmp.sys)
-    wine reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\RvNetMP60" /f > /dev/null 2>&1 || true
-    rm -f "$WINEPREFIX/drive_c/windows/system32/drivers/RvNetMP60.sys"
+    scrub_ndis_driver
     # Disable SCM auto-start (we launch via rvpn_launcher /run)
     wine reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\RvControlSvc" /v Start /t REG_DWORD /d 4 /f > /dev/null 2>&1 || true
     wineserver -k 2>/dev/null || true
@@ -280,10 +284,7 @@ cp "$BUILD_DIR/netsh64.exe" "$WINEPREFIX/drive_c/windows/system32/netsh.exe"
 # replaces that adapter, so the real NDIS driver must never load.
 cp "$BUILD_DIR/drvinst.exe" "$RADMIN/drvinst.exe"
 
-# Scrub any real NDIS driver left behind on a poisoned prefix (run every launch
-# so an already-poisoned prefix recovers without reinstall).
-wine reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\RvNetMP60" /f > /dev/null 2>&1 || true
-rm -f "$WINEPREFIX/drive_c/windows/system32/drivers/RvNetMP60.sys"
+# (the real NDIS driver is scrubbed offline in step 1b, before any wine call)
 
 # ── 7. Generate or load persistent adapter MAC ──
 if [ -f "$MAC_FILE" ]; then
@@ -353,6 +354,9 @@ wine reg add "HKLM\SYSTEM\CurrentControlSet\Control\Network\{4d36e972-e325-11ce-
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Control\Network\{4d36e972-e325-11ce-bfc1-08002be10318}\\${TAP_GUID}\Connection" /v PnpInstanceID /t REG_SZ /d "ROOT\NET\0099" /f
 wine reg add "HKLM\Software\Wow6432Node\Famatech\RadminVPN\1.0\Firewall" /v AdapterId /t REG_SZ /d "$TAP_GUID" /f
 wine reg add "HKLM\SOFTWARE\Famatech\RadminVPN\1.0\Registration" /f
+# Persist the winemenubuilder kill inside the prefix too, so a launch that does
+# not come from this script can never re-hijack the host file associations.
+wine reg add "HKCU\Software\Wine\DllOverrides" /v winemenubuilder.exe /t REG_SZ /d "" /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v DisplayName /t REG_SZ /d "Radmin VPN TAP Bridge" /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v ImagePath /t REG_EXPAND_SZ /d "C:\windows\system32\drivers\rvpnnetmp.sys" /f
 wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\rvpnnetmp" /v Start /t REG_DWORD /d 2 /f
