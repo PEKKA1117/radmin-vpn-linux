@@ -29,6 +29,14 @@ On first launch it downloads the Radmin VPN installer it is validated against (o
 
 Persistent state (wineprefix, MAC, logs) lives in `~/.local/share/radmin-vpn-linux/`.
 
+> **Radmin closing by itself?** Its own updater is installing a newer build inside the running
+> prefix. Do the upgrade in a controlled way instead — it keeps your prefix and your Radmin ID:
+> ```bash
+> ./RadminVPN-Linux-x86_64.AppImage --update
+> ```
+> Then turn off "Automatic updates" in the Radmin settings so it stops trying. Details in
+> [Radmin's own auto-updater](#radmins-own-auto-updater).
+
 ## Prerequisites (source build / non-AppImage)
 
 - **Wine** >= 11.0 (tested on Wine 11.5 Arch Linux and on Wine 11.6 Ubuntu 24.04)
