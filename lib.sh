@@ -51,9 +51,13 @@ purge_hijacked_desktop_entries() {
     local apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
     [ -d "$apps" ] || return 0
 
+    # Two Exec spellings in the wild, depending on the Wine version that wrote
+    # the entry: env "WINEPREFIX=/path" (recent) and env WINEPREFIX="/path"
+    # (older). The optional quote after '=' matches both.
     local list purged=0 f
-    list=$( { grep -rlsE 'WINEPREFIX=[^"]*[Rr]admin' "$apps" --include='*.desktop' 2>/dev/null || true
-              [ -n "${WINEPREFIX:-}" ] && grep -rlsF "WINEPREFIX=$WINEPREFIX" "$apps" --include='*.desktop' 2>/dev/null
+    list=$( { grep -rlsE 'WINEPREFIX="?[^"]*[Rr]admin' "$apps" --include='*.desktop' 2>/dev/null || true
+              [ -n "${WINEPREFIX:-}" ] && grep -rlsF -e "WINEPREFIX=$WINEPREFIX" \
+                  -e "WINEPREFIX=\"$WINEPREFIX" "$apps" --include='*.desktop' 2>/dev/null
               true; } | sort -u )
     [ -n "$list" ] || return 0
 
