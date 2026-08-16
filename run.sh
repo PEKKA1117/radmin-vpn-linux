@@ -456,9 +456,11 @@ _svc_winedebug="-all"
 # filter UI started later; guarded so a missing .so cannot break the launch.
 (
     if [ -f "$BUILD_DIR/rvpn_dnsfix.so" ]; then
+        # Copy to /tmp to avoid LD_PRELOAD parsing issues when BUILD_DIR contains spaces.
+        cp -f "$BUILD_DIR/rvpn_dnsfix.so" /tmp/rvpn_dnsfix.so
         # Prepend, never overwrite: gamemode/mangohud/obs-vkcapture users have
         # their own LD_PRELOAD and would silently lose it for this process.
-        export LD_PRELOAD="$BUILD_DIR/rvpn_dnsfix.so${LD_PRELOAD:+:$LD_PRELOAD}"
+        export LD_PRELOAD="/tmp/rvpn_dnsfix.so${LD_PRELOAD:+:$LD_PRELOAD}"
     else
         warn "rvpn_dnsfix.so missing — private reverse-DNS stalls are not mitigated"
     fi
