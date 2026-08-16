@@ -223,9 +223,9 @@ static LONG CALLBACK crash_handler(PEXCEPTION_POINTERS ep)
  * The setjmp scope == the entire task, so recovery never unwinds to a stale
  * frame. Installed from DllMain before any task runs. */
 
-#define DISPATCH_RVA 0x636A0        /* sub_4636A0 worker entry          */
-#define FREE_RVA     0xC9001        /* sub_4C9001 = operator delete(p,n) */
-#define COUNTER_RVA  0x13F1D8       /* dword_53F1D8 pending-task count   */
+#define DISPATCH_RVA 0x788C0        /* sub_4788C0 worker entry          */
+#define FREE_RVA     0xE5807        /* sub_4E5807 = operator delete(p,n) */
+#define COUNTER_RVA  0x15C778       /* dword_55C778 pending-task count   */
 
 static BYTE *g_rvbase = NULL;       /* RvControlSvc.exe load base */
 
@@ -272,11 +272,11 @@ static unsigned __stdcall hook_dispatch(void **Block)
     return 0;
 }
 
-#define GETINETWORK_RVA 0x5BA70     /* sub_45BA70 rvpn::GetINetwork getter */
+#define GETINETWORK_RVA 0x67D00     /* sub_467D00 rvpn::GetINetwork getter */
 
 static void install_release_guard(void)
 {
-    /* sub_4636A0 prologue: push ebp; mov ebp,esp; push -1 (55 8B EC 6A FF). */
+    /* sub_4788C0 prologue: push ebp; mov ebp,esp; push -1 (55 8B EC 6A FF). */
     static const BYTE expect[5] = { 0x55, 0x8B, 0xEC, 0x6A, 0xFF };
     HMODULE base = GetModuleHandleA(NULL);
     BYTE *t;
@@ -288,15 +288,15 @@ static void install_release_guard(void)
     }
     g_rvbase = (BYTE *)base;
 
-    /* PRIMARY FIX -- neutralise rvpn::GetINetwork (sub_45BA70, +0x5BA70). It
-     * caches a Wine netprofm INetwork at CSetupAdapter+0x1D4; Wine frees that
+    /* PRIMARY FIX -- neutralise rvpn::GetINetwork (sub_467D00, +0x67D00). It
+     * caches a Wine netprofm INetwork at CSetupAdapter+0x1D8; Wine frees that
      * object on network changes ("netprofm: no support for detecting network
      * changes"), so every later GetName/SetName/release through the stale
-     * pointer faults (0xc0000005 @ 0x043304A3) when joining a busy server. The
-     * function already has a handled "failed -> return 0" path, so stub it to
-     * always return 0: the service skips the network naming (a no-op under
-     * Wine's stub netprofm anyway) and the setup task completes normally, adapter
-     * intact. __thiscall, bool in AL, no stack args -> `xor al,al; ret`. */
+     * pointer faults (0xc0000005 @ 0x043304A3 / sub_466900) when joining a
+     * busy server. The function already has a handled "failed -> return 0" path,
+     * so stub it to always return 0: the service skips the network naming (a
+     * no-op under Wine's stub netprofm anyway) and the setup task completes
+     * normally, adapter intact. __thiscall, bool in AL, no stack args -> `xor al,al; ret`. */
     {
         static const BYTE gi_expect[3] = { 0x56, 0x57, 0x8B };  /* push esi;push edi;mov edi,ecx */
         BYTE *g = (BYTE *)base + GETINETWORK_RVA;
@@ -310,7 +310,7 @@ static void install_release_guard(void)
             g[2] = 0xC3;                         /* ret        */
             VirtualProtect(g, 3, go, &go);
             FlushInstructionCache(GetCurrentProcess(), g, 3);
-            dbg("GetINetwork stubbed at RvControlSvc+0x5BA70 (always return 0)");
+            dbg("GetINetwork stubbed at RvControlSvc+0x67D00 (always return 0)");
         }
     }
 
@@ -332,7 +332,7 @@ static void install_release_guard(void)
     t[5] = 0xC3;
     VirtualProtect(t, 6, old, &old);
     FlushInstructionCache(GetCurrentProcess(), t, 6);
-    dbg("task-guard installed at RvControlSvc+0x636A0");
+    dbg("task-guard installed at RvControlSvc+0x788C0");
 }
 
 /* ====== Adapter-list filtering (issue #16) ======
@@ -973,7 +973,7 @@ static BOOL hook_import(HMODULE mod, const char *dll, const char *fn, WORD ord,
                 match = (strcmp(bn->Name, fn) == 0);
             }
             if (!match) continue;
-            if (saved) *saved = (void *)thunk->u1.Function;
+            if (saved && !*saved) *saved = (void *)thunk->u1.Function;
             DWORD old;
             if (!VirtualProtect(&thunk->u1.Function, sizeof(DWORD_PTR), PAGE_READWRITE, &old))
                 return FALSE;

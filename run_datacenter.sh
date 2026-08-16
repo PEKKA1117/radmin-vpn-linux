@@ -410,7 +410,8 @@ cd "$RADMIN"
 # a docker0 hits the same black-holed PTR stall as a desktop. See run.sh.
 (
     if [ -f "$BUILD_DIR/rvpn_dnsfix.so" ]; then
-        export LD_PRELOAD="$BUILD_DIR/rvpn_dnsfix.so${LD_PRELOAD:+:$LD_PRELOAD}"
+        cp -f "$BUILD_DIR/rvpn_dnsfix.so" /tmp/rvpn_dnsfix.so
+        export LD_PRELOAD="/tmp/rvpn_dnsfix.so${LD_PRELOAD:+:$LD_PRELOAD}"
     else
         warn "rvpn_dnsfix.so missing — private reverse-DNS stalls are not mitigated"
     fi
