@@ -103,9 +103,9 @@ fi
 # host that can already build this project; returns non-zero when none do.
 _sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | cut -d' ' -f1
+        sha256sum -- "$1" | cut -d' ' -f1
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | cut -d' ' -f1
+        shasum -a 256 -- "$1" | cut -d' ' -f1
     elif command -v openssl >/dev/null 2>&1; then
         openssl dgst -sha256 "$1" | sed 's/.*= *//'
     else
@@ -121,8 +121,7 @@ _sha256_of() {
 verify_installer() {
     local f="$1" got name
     [ -f "$f" ] || return 0
-    name="$(basename "$f")"
-
+    name="$(basename -- "$f")"
     if [ -z "$RADMIN_SHA256" ]; then
         warn "No pinned sha256 for Radmin $RADMIN_VERSION — installer NOT verified."
         warn "  Set RADMIN_SHA256 to check it, or unset RADMIN_VERSION for the validated build."

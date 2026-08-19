@@ -227,7 +227,7 @@ install_radmin() {
         # a file the user pointed us at themselves.
         case "$INSTALLER" in
             "$DOWNLOAD_DIR"/*)
-                rm -f "$INSTALLER"
+                rm -f -- "$INSTALLER"
                 die "installer failed verification; cached copy removed — re-run to download it again" ;;
             *)
                 die "installer failed verification — refusing to run it" ;;
