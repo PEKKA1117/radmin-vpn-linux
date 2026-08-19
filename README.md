@@ -161,6 +161,7 @@ Produces:
 - `build/drvinst.exe` — no-op stub replacing Radmin's real NDIS driver installer (issue #12)
 - `build/tap_bridge` — native Linux TAP bridge
 - `build/rvpn_dnsfix.so` — native LD_PRELOAD shim, preloaded into the service only
+- `build/rvpn_reuseport.so` — native LD_PRELOAD shim, preloaded into `wineserver`
 - `build/rvpn_filter_ui` — optional GTK4 packet-filter UI (`--filter-ui`)
 
 ### Building the AppImage
@@ -185,12 +186,13 @@ The wineprefix is stored in `./wineprefix/` (source run) or `~/.local/share/radm
 | Component | Description |
 |---|---|
 | `rvpnnetmp.sys` | Wine kernel driver. Emulates the Radmin NDIS miniport. Handles IOCTLs (VERSION, STATUS, SETUP, PEERMAC), TLV frame encoding/decoding, IRP queue for overlapped I/O, MAC-based frame routing for multi-peer support. |
-| `adapter_hook.dll` | Companion DLL loaded alongside RvControlSvc.exe. IAT hooks: renames TAP adapter to match Radmin's expected name, no-ops `RegSetKeySecurity` to work around a Wine SCM bug where services lack the SYSTEM SID. |
+| `adapter_hook.dll` | Companion DLL loaded alongside RvControlSvc.exe. IAT hooks: renames TAP adapter to match Radmin's expected name, no-ops `RegSetKeySecurity` to work around a Wine SCM bug where services lack the SYSTEM SID, and answers the four `Perf{Increment,Decrement}ULong{,Long}CounterValue` lookups Wine's `advapi32` does not export. That last one is not cosmetic: Radmin 2.1 resolves seven perflib entry points in one all-or-nothing cascade, then passes the resulting per-peer counter object as the payload of the peer handshake — so four missing telemetry exports take down the whole data path (issue #24, `docs/wine-perflib.md`). |
 | `tap_bridge` | Native Linux binary. Relays ethernet frames between the TAP device and named pipes (FIFOs) that the Wine driver reads/writes. |
 | `netsh.exe` / `netsh64.exe` | Replaces Wine's netsh stub (32-bit in SysWOW64, 64-bit in System32). Translates Windows `netsh interface ip` commands to Linux `ip addr`/`ip link` commands via a file-based relay, validating the address before it reaches the root relay. |
 | `rvpn_launcher.exe` | Injects `adapter_hook.dll` into the Radmin service process via `CreateRemoteThread` + `LoadLibrary`. |
 | `drvinst.exe` | No-op stub replacing Radmin's real NDIS driver installer. Radmin runs it at runtime to load `NetMP60_1_1_64.sys`, which aborts Wine 11.x via `NdisInitializeReadWriteLock` (issue #12); since our driver already replaces that adapter, the real one must never load. |
 | `rvpn_dnsfix.so` | Native `LD_PRELOAD` shim, injected into the service launch only. Short-circuits reverse DNS (`getnameinfo`/`gethostbyaddr`) of private IPv4/IPv6 at the glibc layer. Radmin PTR-resolves every local candidate address it gathers; on a host whose resolver black-holes RFC1918 PTR queries that stalls for minutes and the service registers but never becomes ready (issue #16). The lookup is issued by Wine's Unix side, out of reach of any hook inside `adapter_hook.dll`. |
+| `rvpn_reuseport.so` | Native `LD_PRELOAD` shim, preloaded into `wineserver` (not into the service — the Unix sockets belong to wineserver). Sets `SO_REUSEPORT` on every TCP socket at creation. Radmin 2.1 does TCP port-reuse NAT traversal: it binds a listener to `uplink:PORT`, advertises that mapping, then binds its outbound peer sockets to the same local port with `SO_REUSEADDR`, which Windows allows. Wine translates that request into no Unix-level option for TCP (`server/sock.c`, `SO_REUSEPORT` is compiled `__APPLE__`-only), so the kernel refuses the second bind and the client sees `WSAEACCES` on every peer connect (issue #24). Wineserver's own conflict bookkeeping still runs, so binds Windows would refuse are still refused. |
 | `rvpn_filter_ui` | Optional GTK4 UI to inspect and filter the packets crossing the bridge. Off by default; launch with `--filter-ui`. |
 
 ## Troubleshooting
@@ -206,6 +208,8 @@ grep -rl 'WINEPREFIX=[^"]*radmin' ~/.local/share/applications --include='*.deskt
 rm -rf ~/.local/share/applications/wine/Programs/"Radmin VPN"
 update-desktop-database ~/.local/share/applications
 ```
+
+**Online and in your networks, but no peer ever connects (`error: 0x700000000`)**: this is Radmin 2.1 on a build older than 1.1.0. The service log looks healthy right up to the peer connections, which then fail in a loop with that code and finally give up with `node offline`. Two independent Wine gaps, both fixed in 1.1.0 and both explained above in the `rvpn_reuseport.so` and `adapter_hook.dll` rows: Wine sets no Unix-level option for a TCP `SO_REUSEADDR`, so 2.1's port-reuse NAT traversal gets `WSAEACCES` on every peer connect; and Wine's `advapi32` is missing four perflib exports, without which 2.1 sends a null payload as its peer handshake. Note the code itself carries no information — it is the generic give-up at the end of the error cascade, so don't try to read a subsystem out of it. The fix is to update this project to 1.1.0; nothing needs to change on the Radmin side.
 
 **Service dies immediately**: check `/tmp/radmin_service.log` for Wine errors. Common cause: old wineprefix from a different Wine version. Delete `./wineprefix/` and re-run.
 

@@ -894,6 +894,55 @@ static int WSAAPI hook_GetNameInfoW(const SOCKADDR *sa, socklen_t salen,
         : EAI_FAIL;
 }
 
+/* ====== perflib V2: the four exports Wine is missing (2.1 peer handshake) ======
+ *
+ * RvControlSvc 2.1 wraps the perflib V2 provider API in FamRT::CPerfCounterset
+ * and resolves seven entry points up front (RvControlSvc+0x82800); one missing
+ * name aborts the whole counterset. Wine's advapi32 exports PerfCreateInstance,
+ * PerfSet*CounterValue and PerfSetCounterRefValue, but not the four
+ * Increment/Decrement helpers -- so on Wine the counterset is never created.
+ *
+ * That would be cosmetic if the counters were only telemetry. They are not:
+ * 2.1 stores the per-peer FamRT::CNetInterfaceCounters instance in node+0xdc
+ * and passes it as the payload of the outgoing peer handshake
+ * (+0x423980 -> +0x41c300, which bails on a NULL payload without recording a
+ * reason). No counters => no handshake sent => hardcoded error 5 =>
+ * CHandshakeFailed => "error: 0x700000000", every peer, forever. The service
+ * reaches ONLINE and joins networks; only peer sessions die.
+ *
+ * Handing out no-op stubs is enough: Wine's own PerfCreateInstance works once
+ * the resolve stops aborting, and nothing on the data path reads a counter back.
+ * CBA: stubs don't count anything; if a build ever reads a counter, back these
+ * with PerfSetULongCounterValue over a local shadow copy. The real fix is four
+ * lines in Wine's advapi32 -- see docs/wine-perflib.md. */
+
+static ULONG WINAPI perf_stub_ul(HANDLE prov, void *inst, ULONG id, ULONG val)
+{
+    (void)prov; (void)inst; (void)id; (void)val;
+    return ERROR_SUCCESS;
+}
+
+static ULONG WINAPI perf_stub_ull(HANDLE prov, void *inst, ULONG id,
+                                  ULONGLONG val)
+{
+    (void)prov; (void)inst; (void)id; (void)val;
+    return ERROR_SUCCESS;
+}
+
+/* The ULongLong variants take a 64-bit value, so they pop 20 bytes instead of
+ * 16 -- the two stubs are not interchangeable. Both are __stdcall/4 args,
+ * verified against the call sites at RvControlSvc+0x4826a6 and +0x4824c9. */
+static FARPROC perf_fill_in(const char *name)
+{
+    if (strcmp(name, "PerfIncrementULongCounterValue") == 0 ||
+        strcmp(name, "PerfDecrementULongCounterValue") == 0)
+        return (FARPROC)perf_stub_ul;
+    if (strcmp(name, "PerfIncrementULongLongCounterValue") == 0 ||
+        strcmp(name, "PerfDecrementULongLongCounterValue") == 0)
+        return (FARPROC)perf_stub_ull;
+    return NULL;
+}
+
 static FARPROC (WINAPI *real_GetProcAddress)(HMODULE, LPCSTR) = NULL;
 
 static FARPROC WINAPI hook_GetProcAddress(HMODULE mod, LPCSTR name)
@@ -901,7 +950,22 @@ static FARPROC WINAPI hook_GetProcAddress(HMODULE mod, LPCSTR name)
     FARPROC p = real_GetProcAddress ? real_GetProcAddress(mod, name) : NULL;
 
     /* Imports by ordinal arrive as a low-word integer, not a string pointer. */
-    if (!p || !name || ((DWORD_PTR)name >> 16) == 0)
+    if (!name || ((DWORD_PTR)name >> 16) == 0)
+        return p;
+
+    /* Ahead of the !p bail-out: this branch exists to answer the lookups Wine
+     * cannot resolve at all. */
+    if (!p && strncmp(name, "Perf", 4) == 0) {
+        FARPROC stub = perf_fill_in(name);
+        if (stub) {
+            char buf[176];
+            snprintf(buf, sizeof(buf), "GetProcAddress: %s absent from Wine "
+                     "-> no-op stub (perflib counterset)", name);
+            dbg(buf);
+            return stub;
+        }
+    }
+    if (!p)
         return p;
     if (mod != GetModuleHandleA("ws2_32.dll"))
         return p;

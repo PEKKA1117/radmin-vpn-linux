@@ -377,6 +377,9 @@ rm -f /tmp/radmin_driver.log
 # Restart wineserver so it loads the driver on next boot
 wineserver -k 2>/dev/null || true
 sleep 1
+# Must precede the next `wine` call, which would otherwise boot a wineserver
+# without the SO_REUSEPORT shim and break every 2.1 peer connect (#24).
+boot_wineserver
 
 # ── 11. Start netsh relay ──
 rm -f "$CMD_FILE" "${CMD_FILE}.proc"

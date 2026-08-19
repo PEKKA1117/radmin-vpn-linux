@@ -378,6 +378,9 @@ wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\RvControlSvc" /v Start /t R
 rm -f /tmp/radmin_driver.log
 
 wineserver -k 2>/dev/null || true
+# Must come before the first `wine` below, which would otherwise boot a wineserver
+# without the SO_REUSEPORT shim and break every 2.1 peer connect (#24).
+boot_wineserver
 wine reg add "HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\Memory Management" /v SystemPages /t REG_DWORD /d 0xFFFFFFFF /f > /dev/null 2>&1
 wine reg add "HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\Memory Management" /v ClearPageFileAtShutdown /t REG_DWORD /d 0 /f > /dev/null 2>&1
 wine reg add "HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\Memory Management" /v LargeSystemCache /t REG_DWORD /d 1 /f > /dev/null 2>&1

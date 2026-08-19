@@ -34,6 +34,32 @@ die()  { echo -e "${RED}[-]${NC} $1" >&2; exit 1; }  # fatal — prints and exit
 wine_version_str() { wine --version 2>/dev/null | head -n1; }
 wine_major() { wine_version_str | sed -n 's/^wine-\([0-9]\+\).*/\1/p'; }
 
+# Boot wineserver explicitly, with rvpn_reuseport.so preloaded.
+#
+# Radmin 2.1 binds its outbound peer sockets to the same local port as its NAT
+# listener (SO_REUSEADDR, which Windows allows). Wine never translates that into a
+# Unix SO_REUSEPORT for TCP, so the kernel refuses the second bind and the service
+# sees WSAEACCES: every peer connect aborts and the GUI shows peers spinning
+# forever (issue #24). See src/rvpn_reuseport.c for the full mechanism.
+#
+# The Unix sockets belong to wineserver, not to the service process, so the shim
+# has to be preloaded HERE and not alongside rvpn_dnsfix.so in the service launch.
+# There is exactly one wineserver per prefix, so this must run after the last
+# `wineserver -k` and before the first `wine` command that would boot an
+# unpreloaded one. -p keeps it alive across the gaps between wine invocations;
+# every launcher's cleanup() kills it on exit.
+boot_wineserver() {
+    if [ -f "$BUILD_DIR/rvpn_reuseport.so" ]; then
+        # Copy to /tmp: LD_PRELOAD cannot express a path containing spaces.
+        cp -f "$BUILD_DIR/rvpn_reuseport.so" /tmp/rvpn_reuseport.so
+        # Prepend, never overwrite: gamemode/mangohud users have their own.
+        LD_PRELOAD="/tmp/rvpn_reuseport.so${LD_PRELOAD:+:$LD_PRELOAD}" wineserver -p
+    else
+        warn "rvpn_reuseport.so missing — Radmin 2.1 peer connections will fail (issue #24)"
+        wineserver -p
+    fi
+}
+
 # ── Radmin version pinning ──────────────────────────────────────────────────────
 # The Radmin build this project is validated against. Everything derives from it:
 # the download URL, the cached installer name, and the --update target. Bump this
@@ -358,6 +384,75 @@ dump_diagnostics() {
             ""|*" dev $tap"|*" dev $tap "*) : ;;
             *) diag_bad "VPN peer traffic (26.0.0.0/8) does not leave via $tap — another routing policy wins" ;;
         esac
+    fi
+    echo ""
+
+    # ── Radmin 2.1 shims (issue #24) ────────────────────────────────────────────
+    # Both 2.1 fixes are invisible in every other section: the service reaches
+    # ONLINE, joins its networks and lists its peers whether or not they are in
+    # place. What breaks is only the peer sessions, and the code Radmin reports for
+    # that (0x700000000) is the generic give-up at the end of its error cascade —
+    # it carries no information at all. So this section checks the shims directly.
+    echo "--- Radmin 2.1 peer-session shims ---"
+    local ws_pids ws_pid reuse_seen perf_seen hooklog svclog peer_fail
+    hooklog="$WINEPREFIX/drive_c/radmin_hook_debug.log"
+    svclog="${LOG:-$WINEPREFIX/drive_c/ProgramData/Famatech/Radmin VPN/service.log}"
+
+    # rvpn_reuseport.so has to be mapped into *wineserver*, not into the service:
+    # the Unix sockets belong to wineserver. The trap this catches is a wineserver
+    # that was already running when the launcher started (a stray one from another
+    # Wine app, or a `wine` command that beat boot_wineserver to it) — nothing else
+    # looks wrong, and every peer connect fails with WSAEACCES.
+    ws_pids=$(pgrep -x wineserver 2>/dev/null) || true
+    if [ -z "$ws_pids" ]; then
+        echo "  [info] wineserver not running — cannot check rvpn_reuseport.so"
+    else
+        reuse_seen=""
+        for ws_pid in $ws_pids; do
+            if grep -q 'rvpn_reuseport' "/proc/$ws_pid/maps" 2>/dev/null; then
+                reuse_seen=1
+            fi
+        done
+        if [ -n "$reuse_seen" ]; then
+            echo "  [ok]   rvpn_reuseport.so mapped into wineserver"
+        else
+            diag_bad "rvpn_reuseport.so is NOT loaded in wineserver — every peer connect will fail (WSAEACCES)"
+            echo "         2.1 binds its outbound peer sockets to the same local port as its NAT"
+            echo "         listener; without the shim the kernel refuses that second bind. Usual"
+            echo "         cause: a wineserver was already up before the launcher booted its own."
+            echo "         Fix: quit other Wine apps, then \`wineserver -k\` and re-run."
+        fi
+    fi
+
+    # The hook logs one line per name it fills in. Absent is not automatically a
+    # fault — a Wine that exports the four functions natively needs no stub — so
+    # this is reported as info and only turns into a verdict below, combined with
+    # an actual peer failure.
+    perf_seen=""
+    if [ -f "$hooklog" ] && grep -q 'perflib counterset' "$hooklog" 2>/dev/null; then
+        perf_seen=1
+        echo "  [ok]   perflib stubs handed out by adapter_hook.dll"
+    else
+        echo "  [info] no perflib stub lines in the hook log (fine if Wine exports them itself)"
+    fi
+
+    peer_fail=""
+    if [ -f "$svclog" ]; then
+        peer_fail=$(iconv -f UTF-16LE -t UTF-8 "$svclog" 2>/dev/null | grep -c '0x700000000') || true
+        [ -n "$peer_fail" ] || peer_fail=0
+        if [ "$peer_fail" -gt 0 ] 2>/dev/null; then
+            diag_bad "$peer_fail peer connection(s) failed with error 0x700000000"
+            echo "         That code is contentless — don't read a subsystem out of it. It means the"
+            echo "         peer handshake was abandoned before being sent. If the two checks above"
+            if [ -z "$perf_seen" ]; then
+                echo "         are green this is new; here the perflib stubs never fired, which is the"
+                echo "         known cause on a Wine that exports neither the four Perf* functions nor"
+                echo "         a replacement — check that build/adapter_hook.dll is from 1.1.0 or later."
+            else
+                echo "         are green this is a new failure mode, not the known 1.1.0 one — please"
+                echo "         report it with this whole block."
+            fi
+        fi
     fi
     echo ""
 
