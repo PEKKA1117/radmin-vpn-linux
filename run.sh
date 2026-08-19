@@ -342,8 +342,14 @@ fi
 good "tap_bridge running (pid=$BRIDGE_PID)"
 
 say "Detecting TAP adapter GUID..."
+# `|| true` is load-bearing (issue #26): we run under `set -euo pipefail`, and grep
+# exits 1 when wmic doesn't list the adapter — pipefail propagates it, the failed
+# assignment kills the script, and the EXIT trap tears everything down printing
+# only "Closing Radmin VPN...". That made the md5 fallback just below unreachable
+# in exactly the case it exists for, and turned a cosmetic wmic gap into a silent
+# no-start on Wine 11.15. `timeout` expiring (124) took the same path.
 TAP_GUID=$(timeout 10 wine wmic path Win32_NetworkAdapter get Name,GUID \
-    | grep "$TAP_DEV" | awk '{print $1}' | tr -d '\r')
+    | grep "$TAP_DEV" | awk '{print $1}' | tr -d '\r' || true)
 if [ -z "$TAP_GUID" ]; then
     TAP_GUID="{$(echo "$ADAPTER_MAC" | sed 's/://g' | md5sum | cut -c1-8)-$(echo "$ADAPTER_MAC" | sed 's/://g' | md5sum | cut -c9-12)-4$(echo "$ADAPTER_MAC" | sed 's/://g' | md5sum | cut -c13-16)-$(echo "$ADAPTER_MAC" | sed 's/://g' | md5sum | cut -c17-20)-$(echo "$ADAPTER_MAC" | sed 's/://g' | md5sum | cut -c21-32)}"
 fi
